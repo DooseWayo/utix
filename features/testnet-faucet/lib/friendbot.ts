@@ -2,6 +2,7 @@ import { err, ok, type Result } from "@/core/result/result";
 import { FRIENDBOT_URL } from "@/core/network/config";
 import { isFeatureEnabled } from "@/core/feature-flags/flags";
 import { runHorizonRequest } from "@/core/horizon/request";
+import { recordFinancialEvent } from "@/core/ledger";
 import { toFaucetErrorCode } from "@/features/testnet-faucet/lib/friendbot.errors";
 import type {
   FaucetErrorCode,
@@ -66,14 +67,28 @@ export async function fundTestnetAccount(
     return retryAfterMs === undefined ? err(code) : err(code, { retryAfterMs });
   }
 
+  let success: FaucetSuccess;
   try {
     const body = (await response.json()) as { hash?: string; ledger?: number };
-    return ok({ accountId, transactionHash: body.hash, ledger: body.ledger });
+    success = { accountId, transactionHash: body.hash, ledger: body.ledger };
   } catch {
     // Friendbot succeeded but returned something we cannot parse. The account
     // is funded either way, so this is still a success.
-    return ok({ accountId });
+    success = { accountId };
   }
+
+  // Value moved: record it on the tamper-evident ledger. Never throws.
+  recordFinancialEvent({
+    action: "faucet.funded",
+    actorId: "friendbot",
+    subject: { kind: "stellar_account", id: accountId },
+    data: {
+      network: "testnet",
+      transactionHash: success.transactionHash ?? null,
+      networkLedger: success.ledger ?? null
+    }
+  });
+  return ok(success);
 }
 
 interface FriendbotProblem {

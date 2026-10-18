@@ -30,6 +30,8 @@
 
 import { err, ok, type Result } from "@/core/result/result";
 import { newCorrelationId, redact } from "@/core/telemetry/telemetry";
+// Cyclic with core/ledger/ledger.ts; both are only used inside functions here.
+import { getLedger, ledgerInputForAudit, type Ledger } from "@/core/ledger/ledger";
 
 export type AuditErrorCode = "audit_denied" | "invalid_audit_field" | "invalid_filter" | "audit_not_found";
 
@@ -229,6 +231,12 @@ export interface AuditOptions {
   limit?: number;
   now?: () => number;
   newId?: () => string;
+  /**
+   * Tamper-evident ledger every recorded event is committed to (see
+   * `core/ledger/`). The app-wide trail uses the app-wide ledger; a trail
+   * created without one is not anchored.
+   */
+  ledger?: Pick<Ledger, "append">;
 }
 
 export interface AuditFilter {
@@ -366,6 +374,21 @@ export function createAuditTrail(options: AuditOptions = {}): AuditTrail {
     storage.setItem(key, JSON.stringify(redact(events)));
   }
 
+  /**
+   * Commits the stored form of an event to the ledger. A ledger that refuses
+   * (broken chain, full storage) never fails the audit write: the event is
+   * still in the trail, and `verifyAuditTrail` reports it as unanchored.
+   */
+  function commitToLedger(event: AuditEvent): void {
+    if (!options.ledger) return;
+    try {
+      const stored = JSON.parse(JSON.stringify(redact(event))) as AuditEvent;
+      options.ledger.append(ledgerInputForAudit(stored));
+    } catch {
+      // Best effort by design; see above.
+    }
+  }
+
   return {
     record(input: AuditInput): Result<AuditEvent, AuditErrorCode> {
       if (!isAction(input.action)) return err("invalid_audit_field");
@@ -398,6 +421,7 @@ export function createAuditTrail(options: AuditOptions = {}): AuditTrail {
 
       // Append-only: the previous events are never rewritten, only extended.
       writeAll([...readAll(), event]);
+      commitToLedger(event);
       return ok(event);
     },
 
@@ -454,7 +478,7 @@ let singleton: AuditTrail | undefined;
 
 /** The app-wide trail. One per session, like the maintenance framework. */
 export function getAuditTrail(): AuditTrail {
-  if (!singleton) singleton = createAuditTrail();
+  if (!singleton) singleton = createAuditTrail({ ledger: getLedger() });
   return singleton;
 }
 

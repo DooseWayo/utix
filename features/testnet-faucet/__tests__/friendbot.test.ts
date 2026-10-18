@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { getLedger } from "@/core/ledger";
 import { withMswHandlers } from "@/core/testing/msw";
 import {
   classifyFriendbotResponse,
@@ -102,6 +103,22 @@ describe("fundTestnetAccount", () => {
     if (!result.ok) return;
     expect(result.value.transactionHash).toHaveLength(64);
     expect(result.value.ledger).toBe(1017700);
+  });
+
+  it("records a successful funding on the tamper-evident ledger, and nothing on a refusal", async () => {
+    getLedger().reset();
+    const result = await fundTestnetAccount({ accountId: newAccountId });
+    await fundTestnetAccount({ accountId: fundedAccountId });
+
+    const entries = getLedger().entries();
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({
+      kind: "financial",
+      action: "faucet.funded",
+      subject: { kind: "stellar_account", id: newAccountId },
+      data: { network: "testnet", transactionHash: result.ok ? result.value.transactionHash : null }
+    });
+    expect(getLedger().verify().ok).toBe(true);
   });
 
   it.each([

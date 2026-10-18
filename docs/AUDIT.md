@@ -149,6 +149,16 @@ events are already structured for an export into a real store.
 - a nested value would be stored as an audit context, or the retention limit
   stops being injectable.
 
+## Tamper evidence
+
+The app-wide trail (`getAuditTrail()`) commits every recorded event to the
+hash-chained ledger in `core/ledger/`: the ledger entry carries the event id
+and a SHA-256 digest of the event as stored. `verifyAuditTrail(trail, ledger)`
+reports events edited (`tampered`) or removed outside retention (`missing`)
+after they were recorded. The `AuditEvent` shape and export formats are
+unchanged. See [LEDGER.md](./LEDGER.md) for verification, export, failure
+modes and recovery.
+
 ## What this is not
 
 - It is not telemetry. No sampling, no dashboards, no alert thresholds.

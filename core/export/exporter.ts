@@ -34,6 +34,7 @@ import {
 
 export type ExportErrorCode =
   | "export_denied"
+  | "field_authorization_denied"
   | "schema_unsupported"
   | "empty_source"
   | "unsupported_scope"
@@ -52,8 +53,31 @@ export type ExportScope = "own" | "maintainer";
 
 /** Who is asking. Only maintainers may request the `maintainer` scope. */
 export type ExportActor =
-  | { kind: "user" }
-  | { kind: "maintainer"; token?: string };
+  | { kind: "user"; id?: string; permissions?: readonly string[] }
+  | { kind: "maintainer"; token?: string; id?: string; permissions?: readonly string[] }
+  | { kind: "service"; id?: string; permissions?: readonly string[] };
+
+/** Rule defining authorization requirements for individual record fields. */
+export interface FieldAuthorizationRule {
+  readonly field: string;
+  readonly minScope?: ExportScope;
+  readonly requiredPermissions?: readonly string[];
+  readonly onDenied?: "omit" | "mask" | "error";
+}
+
+export const DEFAULT_SENSITIVE_FIELD_RULES: readonly FieldAuthorizationRule[] = [
+  { field: "internalLatencyMs", minScope: "maintainer", onDenied: "omit" },
+  { field: "ipAddress", minScope: "maintainer", onDenied: "mask" },
+  { field: "userAgent", minScope: "maintainer", onDenied: "omit" },
+  { field: "sessionToken", minScope: "maintainer", onDenied: "omit" },
+  { field: "nodeId", minScope: "maintainer", onDenied: "omit" },
+  { field: "adminNotes", minScope: "maintainer", onDenied: "mask" },
+  { field: "riskScore", minScope: "maintainer", onDenied: "omit" },
+  { field: "debugTrace", minScope: "maintainer", onDenied: "omit" },
+  { field: "traceId", minScope: "maintainer", onDenied: "omit" },
+  { field: "rawPayload", minScope: "maintainer", onDenied: "omit" },
+  { field: "systemSignature", minScope: "maintainer", onDenied: "omit" }
+];
 
 export interface ExportRecordSource {
   /** Stable identifier, e.g. `operation_log`. */
@@ -62,6 +86,8 @@ export interface ExportRecordSource {
   schemaVersion: string;
   /** Which scope the source's records belong to. */
   scope: ExportScope;
+  /** Optional field-level authorization rules for records in this source. */
+  fieldRules?: readonly FieldAuthorizationRule[];
   /** Collects the records synchronously. May include sensitive-looking fields. */
   collect: () => ExportRecord[];
 }
@@ -81,6 +107,12 @@ export interface ExportRequest {
   page?: number;
   /** Opaque cursor returned by a previous page. */
   cursor?: string;
+  /** Optional field selection projection. */
+  fields?: readonly string[];
+  /** Optional field-level authorization rules to apply. */
+  fieldRules?: readonly FieldAuthorizationRule[];
+  /** When true, requesting unauthorized fields returns field_authorization_denied. */
+  strictFields?: boolean;
   /**
    * When set, generating this export is a high-risk write guarded by an
    * idempotency key: a retried request replays the same envelope instead of
@@ -106,6 +138,7 @@ export interface ExportEnvelope {
   totalRecords: number;
   nextCursor: string | null;
   hasMore: boolean;
+  fieldsFiltered?: number;
   records: ExportRecord[];
 }
 
@@ -128,6 +161,96 @@ export function authorizeExport(
     return err("export_denied");
   }
   return ok(authScope(actor));
+}
+
+/**
+ * Evaluates whether an actor has permission to export specific fields under given rules.
+ */
+export function evaluateFieldAuthorization(
+  actor: ExportActor,
+  requestedFields: readonly string[] | undefined,
+  rules: readonly FieldAuthorizationRule[]
+): { authorized: boolean; deniedFields: string[] } {
+  if (actor.kind === "maintainer") {
+    return { authorized: true, deniedFields: [] };
+  }
+
+  const isRulePermitted = (rule: FieldAuthorizationRule): boolean => {
+    if (rule.minScope === "maintainer" && actor.kind !== "maintainer") {
+      return false;
+    }
+    if (rule.requiredPermissions && rule.requiredPermissions.length > 0) {
+      const actorPerms = actor.permissions ?? [];
+      const hasAll = rule.requiredPermissions.every((p) => actorPerms.includes(p));
+      if (!hasAll) return false;
+    }
+    return true;
+  };
+
+  const deniedFields: string[] = [];
+  if (requestedFields) {
+    for (const field of requestedFields) {
+      const rule = rules.find((r) => r.field === field);
+      if (rule && !isRulePermitted(rule)) {
+        deniedFields.push(field);
+      }
+    }
+  }
+
+  return { authorized: deniedFields.length === 0, deniedFields };
+}
+
+/**
+ * Filters a record's fields based on field-level authorization rules and optional projection.
+ */
+export function applyFieldLevelAuthorization(
+  record: ExportRecord,
+  actor: ExportActor,
+  options: {
+    requestedFields?: readonly string[];
+    rules: readonly FieldAuthorizationRule[];
+  }
+): { record: ExportRecord; filteredCount: number } {
+  const isMaintainer = actor.kind === "maintainer";
+  const userPerms = actor.permissions ?? [];
+  const allowedProjection = options.requestedFields ? new Set(options.requestedFields) : null;
+
+  const sanitized: ExportRecord = {};
+  let filteredCount = 0;
+
+  for (const [key, value] of Object.entries(record)) {
+    // If a projection was requested and this field is not in it, omit it
+    if (allowedProjection && !allowedProjection.has(key)) {
+      continue;
+    }
+
+    const rule = options.rules.find((r) => r.field === key);
+    let isAuthorized = true;
+
+    if (rule && !isMaintainer) {
+      if (rule.minScope === "maintainer") {
+        isAuthorized = false;
+      }
+      if (rule.requiredPermissions && rule.requiredPermissions.length > 0) {
+        if (!rule.requiredPermissions.every((p) => userPerms.includes(p))) {
+          isAuthorized = false;
+        }
+      }
+    }
+
+    if (isAuthorized) {
+      sanitized[key] = value;
+    } else {
+      filteredCount += 1;
+      const onDenied = rule?.onDenied ?? "omit";
+      if (onDenied === "mask") {
+        sanitized[key] = "[FILTERED: UNAUTHORIZED]";
+      }
+      // If "omit", field is not added to sanitized
+    }
+  }
+
+  return { record: sanitized, filteredCount };
 }
 
 interface CollectedExportRecord {
@@ -277,6 +400,34 @@ export function exportRecords(
         return err("schema_unsupported");
       }
 
+      const combinedRules: FieldAuthorizationRule[] = [
+        ...DEFAULT_SENSITIVE_FIELD_RULES,
+        ...(request.fieldRules ?? []),
+        ...sources.flatMap((s) => s.fieldRules ?? [])
+      ];
+
+      // Strict field authorization gate: if strictFields is requested with specific fields, verify permissions
+      if (request.fields && request.strictFields) {
+        const fieldAuth = evaluateFieldAuthorization(request.actor, request.fields, combinedRules);
+        if (!fieldAuth.authorized) {
+          auditExport(
+            request,
+            "denied",
+            { requestedFields: request.fields.join(","), deniedFields: fieldAuth.deniedFields.join(",") },
+            "field_authorization_denied"
+          );
+          if (protectedRequest) exportIdempotencyRef.current.fail(protectedRequest, "field_authorization_denied");
+          emitTelemetry({
+            op: "export.authorize",
+            actorType: "user",
+            result: "failure",
+            correlationId: request.correlationId ?? newCorrelationId(),
+            errorCode: "field_authorization_denied"
+          });
+          return err("field_authorization_denied");
+        }
+      }
+
       // Charged after the cheap refusals and after a replay, so neither an
       // invalid request nor a retried one spends the caller's allowance.
       const charged = exportQuotaRef.current.consume({
@@ -320,6 +471,16 @@ export function exportRecords(
       const paged = cursorPage.items.map((entry) => entry.record);
       const totalRecords = keyed.length;
 
+      let totalFieldsFiltered = 0;
+      const sanitizedPaged = paged.map((record) => {
+        const result = applyFieldLevelAuthorization(record, request.actor, {
+          requestedFields: request.fields,
+          rules: combinedRules
+        });
+        totalFieldsFiltered += result.filteredCount;
+        return redact(result.record) as ExportRecord;
+      });
+
       const envelope: ExportEnvelope = {
         schemaVersion: request.schemaVersion,
         scope: request.scope,
@@ -327,19 +488,21 @@ export function exportRecords(
         expiresAt: new Date(Date.now() + ttlMs).toISOString(),
         generator: EXPORT_GENERATOR,
         correlationId: request.correlationId ?? newCorrelationId(),
-        recordCount: paged.length,
+        recordCount: sanitizedPaged.length,
         page,
         totalRecords,
         nextCursor: cursorPage.nextCursor,
         hasMore: cursorPage.hasMore,
-        records: paged.map((record) => redact(record) as ExportRecord)
+        fieldsFiltered: totalFieldsFiltered,
+        records: sanitizedPaged
       };
 
       auditExport(request, "allowed", {
         recordCount: envelope.recordCount,
         totalRecords: envelope.totalRecords,
         schemaVersion: envelope.schemaVersion,
-        expiresAt: envelope.expiresAt
+        expiresAt: envelope.expiresAt,
+        fieldsFiltered: totalFieldsFiltered
       });
 
       if (protectedRequest) {

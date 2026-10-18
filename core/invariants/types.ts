@@ -90,11 +90,14 @@ export interface InvariantViolation {
 }
 
 export class InvariantViolationError extends Error {
-  constructor(public readonly violations: readonly InvariantViolation[]) {
+  public readonly violations: readonly InvariantViolation[];
+
+  constructor(violations: readonly InvariantViolation[]) {
     super(
       `Domain invariant violation(s) detected:\n` +
         violations.map((v) => `  [${v.invariantId}] ${v.name}: ${v.message} (Entity: ${v.entityType}#${v.entityId})`).join('\n')
     );
     this.name = 'InvariantViolationError';
+    this.violations = violations;
   }
 }

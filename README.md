@@ -27,6 +27,7 @@ Infrastructure docs: [Telemetry](./docs/TELEMETRY.md) ·
 [Operation recovery](./docs/OPERATION_RECOVERY.md) ·
 [Reconciliation](./docs/RECONCILIATION.md) ·
 [Audit trail](./docs/AUDIT.md) ·
+[Tamper-evident ledger](./docs/LEDGER.md) ·
 [API Contract](./docs/API_CONTRACT.md).
 
 ## Tools

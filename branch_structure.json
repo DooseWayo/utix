@@ -1,0 +1,18 @@
+{
+  "default_branch": "main",
+  "branches": [
+    "feat/tamper-evident-ledger",
+    "main",
+    "origin"
+  ],
+  "parent": {
+    "feat/tamper-evident-ledger": "main",
+    "main": null,
+    "origin": "main"
+  },
+  "order": [
+    "main",
+    "feat/tamper-evident-ledger",
+    "origin"
+  ]
+}

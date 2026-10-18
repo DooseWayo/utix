@@ -6,8 +6,8 @@
  */
 
 import { err, ok, type Result } from '@/core/result/result';
-import { DomainInvariantChecker } from './checker';
-import { DomainState, Event, InvariantViolation, Ticket, TransferRecord } from './types';
+import { DomainInvariantChecker } from './checker.ts';
+import type { DomainState, Event, InvariantViolation, Ticket, TransferRecord } from './types.ts';
 
 export interface IssueTicketParams {
   readonly id: string;
@@ -337,3 +337,209 @@ export function redeemTicket(
     tickets: updatedTickets
   });
 }
+
+/**
+ * 2-Step Safe Ownership Transfer: Initiates a pending ownership transfer proposal for a ticket.
+ * Checks INV-02 (ownership), INV-05 (lock bar), and INV-11 (blacklists).
+ */
+export function initiateSafeTicketTransfer(
+  state: DomainState,
+  params: {
+    readonly ticketId: string;
+    readonly fromAddress: string;
+    readonly toAddress: string;
+    readonly expiresInMs?: number;
+    readonly priceStroops?: number;
+    readonly memo?: string;
+    readonly idempotencyKey?: string;
+    readonly correlationId?: string;
+    readonly actor: { kind: "user" | "maintainer" | "service" | "contract"; id: string };
+  },
+  store: import("@/core/ownership/ownership").OwnershipTransferStore = import("@/core/ownership/ownership").defaultOwnershipStore
+): Result<import("@/core/ownership/types").OwnershipTransferProposal, InvariantViolation> {
+  const ticket = state.tickets.get(params.ticketId);
+  if (!ticket) {
+    return err({
+      invariantId: "INV-02",
+      name: "Single Active Ownership",
+      severity: "critical",
+      entityId: params.ticketId,
+      entityType: "ticket",
+      message: `Ticket '${params.ticketId}' not found`
+    });
+  }
+
+  if (ticket.ownerAddress !== params.fromAddress) {
+    return err({
+      invariantId: "INV-02",
+      name: "Single Active Ownership",
+      severity: "critical",
+      entityId: ticket.id,
+      entityType: "ticket",
+      message: `Transfer initiator '${params.fromAddress}' is not the current owner '${ticket.ownerAddress}'`
+    });
+  }
+
+  if (ticket.status === "locked" || ticket.fraudFlag) {
+    return err({
+      invariantId: "INV-05",
+      name: "Escrow / Fraud Lock Transfer Bar",
+      severity: "critical",
+      entityId: ticket.id,
+      entityType: "ticket",
+      message: "Ticket is locked or flagged for fraud and cannot be transferred"
+    });
+  }
+
+  if (state.blacklistedAddresses.has(params.fromAddress) || state.blacklistedAddresses.has(params.toAddress)) {
+    return err({
+      invariantId: "INV-11",
+      name: "Blacklisted Principal Action Quarantine",
+      severity: "critical",
+      entityId: ticket.id,
+      entityType: "ticket",
+      message: "Transfer involves a blacklisted party and is quarantined"
+    });
+  }
+
+  const proposalResult = store.initiate({
+    resourceId: params.ticketId,
+    resourceType: "ticket",
+    currentOwner: params.fromAddress,
+    proposedOwner: params.toAddress,
+    expiresInMs: params.expiresInMs,
+    priceStroops: params.priceStroops,
+    memo: params.memo,
+    idempotencyKey: params.idempotencyKey,
+    correlationId: params.correlationId,
+    actor: params.actor
+  });
+
+  if (!proposalResult.ok) {
+    return err({
+      invariantId: "INV-02",
+      name: "Single Active Ownership",
+      severity: "high",
+      entityId: ticket.id,
+      entityType: "ticket",
+      message: `Safe ownership transfer initiation rejected: ${proposalResult.code}`
+    });
+  }
+
+  return ok(proposalResult.value);
+}
+
+/**
+ * 2-Step Safe Ownership Transfer: Completes a pending ticket transfer upon recipient acceptance.
+ * Atomically updates ticket owner, increments nonce, and records the transfer.
+ */
+export function acceptSafeTicketTransfer(
+  state: DomainState,
+  params: {
+    readonly transferId: string;
+    readonly transferRecordId: string;
+    readonly organizerFeeStroops?: number;
+    readonly protocolFeeStroops?: number;
+    readonly sellerProceedsStroops?: number;
+    readonly nonce: string;
+    readonly actor: { kind: "user" | "maintainer" | "service" | "contract"; id: string };
+    readonly now?: number | Date;
+  },
+  store: import("@/core/ownership/ownership").OwnershipTransferStore = import("@/core/ownership/ownership").defaultOwnershipStore
+): Result<{ state: DomainState; proposal: import("@/core/ownership/types").OwnershipTransferProposal }, InvariantViolation> {
+  const proposal = store.getTransfer(params.transferId, params.now);
+  if (!proposal) {
+    return err({
+      invariantId: "INV-02",
+      name: "Single Active Ownership",
+      severity: "critical",
+      entityId: params.transferId,
+      entityType: "transfer",
+      message: `Ownership transfer proposal '${params.transferId}' not found`
+    });
+  }
+
+  const acceptResult = store.accept({
+    transferId: params.transferId,
+    actor: params.actor,
+    now: params.now
+  });
+
+  if (!acceptResult.ok) {
+    return err({
+      invariantId: "INV-02",
+      name: "Single Active Ownership",
+      severity: "high",
+      entityId: params.transferId,
+      entityType: "transfer",
+      message: `Ownership transfer acceptance rejected: ${acceptResult.code}`
+    });
+  }
+
+  const accepted = acceptResult.value;
+  const ticket = state.tickets.get(accepted.resourceId);
+  if (!ticket) {
+    return err({
+      invariantId: "INV-02",
+      name: "Single Active Ownership",
+      severity: "critical",
+      entityId: accepted.resourceId,
+      entityType: "ticket",
+      message: `Ticket '${accepted.resourceId}' not found for transfer`
+    });
+  }
+
+  // Check nonce replay
+  if (state.processedNonces.has(params.nonce)) {
+    return err({
+      invariantId: "INV-09",
+      name: "Nonce & Idempotency Replay Protection",
+      severity: "critical",
+      entityId: params.transferRecordId,
+      entityType: "transfer",
+      message: `Replay detected: transfer nonce '${params.nonce}' already processed`
+    });
+  }
+
+  // Apply transfer atomically
+  const updatedTicket: Ticket = {
+    ...ticket,
+    ownerAddress: accepted.proposedOwner,
+    status: "transferred",
+    nonce: ticket.nonce + 1
+  };
+
+  const priceStroops = accepted.priceStroops ?? 0;
+  const organizerFee = params.organizerFeeStroops ?? 0;
+  const protocolFee = params.protocolFeeStroops ?? 0;
+  const sellerProceeds = params.sellerProceedsStroops ?? (priceStroops - organizerFee - protocolFee);
+
+  const transferRecord: TransferRecord = {
+    id: params.transferRecordId,
+    ticketId: ticket.id,
+    fromAddress: accepted.currentOwner,
+    toAddress: accepted.proposedOwner,
+    priceStroops,
+    organizerFeeStroops: organizerFee,
+    protocolFeeStroops: protocolFee,
+    sellerProceedsStroops: sellerProceeds,
+    nonce: params.nonce,
+    timestamp: typeof params.now === "number" ? params.now : Date.now()
+  };
+
+  const updatedTickets = new Map(state.tickets);
+  updatedTickets.set(updatedTicket.id, updatedTicket);
+
+  const updatedNonces = new Set(state.processedNonces);
+  updatedNonces.add(params.nonce);
+
+  const nextState: DomainState = {
+    ...state,
+    tickets: updatedTickets,
+    transfers: [...state.transfers, transferRecord],
+    processedNonces: updatedNonces
+  };
+
+  return ok({ state: nextState, proposal: accepted });
+}
+

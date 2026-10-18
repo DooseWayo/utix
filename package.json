@@ -5,11 +5,11 @@
   "scripts": {
     "registry": "node scripts/generate-registry.mjs",
     "predev": "npm run registry",
-    "dev": "next dev",
+    "dev": "node api.js && next dev",
     "prebuild": "npm run registry",
-    "build": "next build",
+    "build": "node api.js && next build",
     "postbuild": "node scripts/bundle-budget.mjs",
-    "start": "next start",
+    "start": "node api.js && next start",
     "prelint": "npm run registry",
     "lint": "eslint .",
     "pretest": "npm run registry",
@@ -37,7 +37,10 @@
     "issues:drips": "node scripts/create-issues.mjs --target drips",
     "recovery:validate": "node scripts/validate-recovery.mjs",
     "health:check": "node scripts/health-check.mjs",
-    "bundle:check": "node scripts/bundle-budget.mjs"
+    "bundle:check": "node scripts/bundle-budget.mjs",
+    "diagnostics:contributor": "node --loader ./scripts/loader.mjs scripts/contributor-diagnostics.mjs",
+    "doctor": "node --loader ./scripts/loader.mjs scripts/contributor-diagnostics.mjs",
+    "verify:issues-264-275": "node --loader ./scripts/loader.mjs scripts/verify-issues-264-275.mjs"
   },
   "dependencies": {
     "@stellar/stellar-sdk": "^13.3.0",

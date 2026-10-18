@@ -91,6 +91,20 @@ export const operationMachine = createLifecycle({
   ]
 });
 
+/** Safe ownership transfer. `pending` is initial; `accepted`, `cancelled`, `rejected`, `expired` are terminal. */
+export const ownershipTransferMachine = createLifecycle({
+  name: "ownership_transfer",
+  initial: "pending",
+  states: ["pending", "accepted", "cancelled", "rejected", "expired"],
+  terminal: ["accepted", "cancelled", "rejected", "expired"],
+  transitions: [
+    { from: "pending", event: "accept", to: "accepted" },
+    { from: "pending", event: "cancel", to: "cancelled" },
+    { from: "pending", event: "reject", to: "rejected" },
+    { from: "pending", event: "expire", to: "expired" }
+  ]
+});
+
 /** Human labels for badges and API `label` fields. */
 export const LIFECYCLE_LABELS: Record<string, Record<string, string>> = {
   worker_job: {
@@ -115,17 +129,25 @@ export const LIFECYCLE_LABELS: Record<string, Record<string, string>> = {
     started: "Started",
     succeeded: "Succeeded",
     failed: "Failed"
+  },
+  ownership_transfer: {
+    pending: "Pending Acceptance",
+    accepted: "Accepted",
+    cancelled: "Cancelled",
+    rejected: "Rejected",
+    expired: "Expired"
   }
 };
 
-export type CoreRecordKind = "worker_job" | "notification" | "export_envelope" | "operation";
+export type CoreRecordKind = "worker_job" | "notification" | "export_envelope" | "operation" | "ownership_transfer";
 
 /** Every core record machine, keyed by record kind. */
 export const RECORD_MACHINES: Record<CoreRecordKind, LifecycleMachine> = {
   worker_job: workerJobMachine,
   notification: notificationMachine,
   export_envelope: exportEnvelopeMachine,
-  operation: operationMachine
+  operation: operationMachine,
+  ownership_transfer: ownershipTransferMachine
 };
 
 export function recordMachine(kind: string): Result<LifecycleMachine, LifecycleErrorCode> {

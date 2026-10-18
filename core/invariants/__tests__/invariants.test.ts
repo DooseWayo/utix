@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { DomainInvariantChecker } from '../checker';
 import { issueTicket, redeemTicket, transferTicket } from '../mutations';
-import { DomainState, Event, Ticket } from '../types';
+import type { DomainState, Event, Ticket } from '../types';
 
 describe('Domain Model Invariant Test Suite (#78)', () => {
   const createInitialState = (): DomainState => {

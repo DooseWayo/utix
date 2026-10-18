@@ -6,15 +6,16 @@
  * or fraudulent states.
  */
 
-import {
+import type {
   DomainState,
   Event,
   InvariantViolation,
-  InvariantViolationError,
   Ticket,
   TicketStatus,
   TransferRecord
-} from './types';
+} from './types.ts';
+import { InvariantViolationError } from './types.ts';
+
 
 export const VALID_TRANSITIONS: Record<TicketStatus, readonly TicketStatus[]> = {
   issued: ['transferred', 'locked', 'redeemed', 'expired', 'burned'],

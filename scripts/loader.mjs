@@ -16,6 +16,23 @@ export async function resolve(specifier, context, nextResolve) {
         };
       }
     }
+  } else if (specifier.startsWith(".") && context.parentURL) {
+    try {
+      const parentPath = new URL(context.parentURL).pathname;
+      const parentDir = path.dirname(parentPath);
+      const target = path.resolve(parentDir, specifier);
+      for (const ext of ["", ".ts", ".tsx", ".mjs", ".js", "/index.ts", "/index.js"]) {
+        const candidate = target + ext;
+        if (fs.existsSync(candidate) && fs.statSync(candidate).isFile()) {
+          return {
+            shortCircuit: true,
+            url: pathToFileURL(candidate).href
+          };
+        }
+      }
+    } catch {
+      // Fall through to nextResolve
+    }
   }
   return nextResolve(specifier, context);
 }
